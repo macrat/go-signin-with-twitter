@@ -1,36 +1,14 @@
 package main
 
 import (
-	"encoding/gob"
 	"fmt"
-	"log"
-	"net"
 	"net/http"
 	"os"
-	"text/template"
 
-	"github.com/gorilla/mux"
-	"github.com/gorilla/sessions"
-	_ "github.com/joho/godotenv/autoload"
 	"github.com/mrjones/oauth"
 )
 
-var token = ""
-
-var notAuthenticatedTemplate = template.Must(template.New("").Parse(`
-<html><body>
-Auth w/ Twitter:
-<form action="/authorize" method="POST"><input type="submit" value="Ok, authorize this app with my id"/></form>
-</body></html>
-`))
-
-var userInfoTemplate = template.Must(template.New("").Parse(`
-<html><body>
-Got Milk.
-</body></html>
-`))
-
-var c = oauth.NewConsumer(
+var consumer = oauth.NewConsumer(
 	os.Getenv("TWITTER_KEY"),
 	os.Getenv("TWITTER_SECRET"),
 	oauth.ServiceProvider{
@@ -40,59 +18,58 @@ var c = oauth.NewConsumer(
 	},
 )
 
-var store = sessions.NewCookieStore([]byte(os.Getenv("SESSION_SECRET")))
-
-func init() {
-	gob.Register(&oauth.RequestToken{})
-}
-
-func main() {
-	r := mux.NewRouter()
-	r.HandleFunc("/", HomePageHandler)
-	r.HandleFunc("/authorize", AuthorizeHandler)
-	r.HandleFunc("/oauth_callback", OauthCallbackHandler)
-	server := &http.Server{Handler: r}
-	listener, err := net.Listen("tcp", ":5000")
-	if nil != err {
-		log.Fatalln(err)
-	}
-	if err := server.Serve(listener); nil != err {
-		log.Fatalln(err)
-	}
-}
-
-func HomePageHandler(w http.ResponseWriter, r *http.Request) {
-	notAuthenticatedTemplate.Execute(w, nil)
-}
-
 func AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	tokenUrl := fmt.Sprintf("http://%s/oauth_callback", r.Host)
-	token, requestUrl, err := c.GetRequestTokenAndUrl(tokenUrl)
+	token, requestUrl, err := consumer.GetRequestTokenAndUrl(tokenUrl)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Errorf("failed get token: %s\n", err.Error())
+		fmt.Fprintln(w, "failed get token")
+		return
 	}
-	session, _ := store.Get(r, "sign-in-with-twitter")
-	session.Values[token.Token] = token
-	sessionErr := session.Save(r, w)
-	if sessionErr != nil {
-		log.Fatal(sessionErr)
-	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:  "token",
+		Value: token.Token,
+		Path:  "/",
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:  "secret",
+		Value: token.Secret,
+		Path:  "/",
+	})
+
 	http.Redirect(w, r, requestUrl, http.StatusFound)
 }
 
 func OauthCallbackHandler(w http.ResponseWriter, r *http.Request) {
-	session, _ := store.Get(r, "sign-in-with-twitter")
-	values := r.URL.Query()
-	verificationCode := values.Get("oauth_verifier")
-	tokenKey := values.Get("oauth_token")
-	token := session.Values[tokenKey]
-	accessToken, err := c.AuthorizeToken(
-		token.(*oauth.RequestToken),
-		verificationCode,
+	token, _ := r.Cookie("token")
+	secret, _ := r.Cookie("secret")
+
+	if r.URL.Query().Get("oauth_token") != token.Value {
+		fmt.Errorf("invalid token\n")
+		fmt.Fprintln(w, "invalid token")
+		return
+	}
+
+	accessToken, err := consumer.AuthorizeToken(
+		&oauth.RequestToken{token.Value, secret.Value},
+		r.URL.Query().Get("oauth_verifier"),
 	)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Errorf("failed to get access token: %s\n", err.Error())
+		fmt.Fprintln(w, "failed to get access token")
+		return
 	}
-	fmt.Printf("%v", accessToken)
-	userInfoTemplate.Execute(w, nil)
+	fmt.Println(accessToken)
+	fmt.Fprintln(w, "got access token")
+}
+
+func main() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "<a href=\"/authorize\">sign in with twitter</a>")
+	})
+	http.HandleFunc("/authorize", AuthorizeHandler)
+	http.HandleFunc("/oauth_callback", OauthCallbackHandler)
+
+	fmt.Errorf("error: %s\n", http.ListenAndServe(":5000", nil))
 }
