@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
+	"net/url"
 	"os"
 
 	"github.com/mrjones/oauth"
@@ -61,15 +64,61 @@ func OauthCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Println(accessToken)
-	fmt.Fprintln(w, "got access token")
+
+	tok, _ := json.Marshal(accessToken)
+	http.SetCookie(w, &http.Cookie{
+		Name:  "access_token",
+		Value: url.QueryEscape(string(tok)),
+		Path:  "/",
+	})
+	fmt.Println("json", string(tok))
+	fmt.Println("query", url.QueryEscape(string(tok)))
+
+	http.Redirect(w, r, "/user_info", http.StatusFound)
+}
+
+func UserInfoHandler(w http.ResponseWriter, r *http.Request) {
+	c, _ := r.Cookie("access_token")
+	raw, _ := url.QueryUnescape(c.Value)
+	var token oauth.AccessToken
+	json.Unmarshal([]byte(raw), &token)
+
+	resp, err := consumer.Get("https://api.twitter.com/1.1/account/verify_credentials.json", nil, &token)
+	if err != nil {
+		fmt.Errorf("failed to get account information: %s\n", err.Error())
+		fmt.Fprintln(w, "failed to get account information")
+		return
+	}
+	defer resp.Body.Close()
+
+	bytes, _ := ioutil.ReadAll(resp.Body)
+
+	var info struct {
+		ID          int    `json:"id"`
+		Name        string `json:"name"`
+		ScreenName  string `json:"screen_name"`
+		Description string `json:"description"`
+		Icon        string `json:"profile_image_url_https"`
+	}
+	json.Unmarshal(bytes, &info)
+
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprintf(w, "<img src=\"%s\"><br>ID: %d<br>Name: %s (@%s)<br>Description:<br>%s",
+		info.Icon,
+		info.ID,
+		info.Name,
+		info.ScreenName,
+		info.Description,
+	)
 }
 
 func main() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "<a href=\"/authorize\">sign in with twitter</a>")
+		fmt.Fprintln(w, "<a href=\"/user_info\">show user info</a><br><a href=\"/authorize\">sign in with twitter</a>")
 	})
 	http.HandleFunc("/authorize", AuthorizeHandler)
 	http.HandleFunc("/oauth_callback", OauthCallbackHandler)
+	http.HandleFunc("/user_info", UserInfoHandler)
 
 	fmt.Errorf("error: %s\n", http.ListenAndServe(":5000", nil))
 }
